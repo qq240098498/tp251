@@ -30,8 +30,11 @@ const state = {
     rooms: { status: '', type: '', keyword: '', probeStatus: '', probeCal: 'all' },
     batches: { status: '', roomId: '', product: '', noRecord: false },
     records: { batchId: '', probeId: '', source: '', from: '', to: '' },
-    releases: { decision: '' }
-  }
+    releases: { decision: '' },
+    report: { from: '', to: '', roomId: '', groupBy: 'room' }
+  },
+  report: null,
+  reportDrill: {}
 };
 
 /* ---------- 基础工具 ---------- */
@@ -184,6 +187,7 @@ async function loadView(view) {
     else if (view === 'batches') await loadBatchesView();
     else if (view === 'records') await loadRecordsView();
     else if (view === 'releases') await loadReleasesView();
+    else if (view === 'report') await loadReportView();
   } catch (err) { showError(err); }
 }
 
@@ -426,7 +430,9 @@ function batchDetailRow(b) {
   const check = d.releaseCheck || {};
   const conds = (check.conditions || []).slice();
   const expired = check.expiredProbes || [];
-  conds.push({ key: 'calibration', ok: expired.length === 0, value: expired.length, limit: 0, text: '参与判定的探头都在校准有效期内' });
+  if (check.hasRecords === false) {
+    conds.push({ key: 'records', ok: false, value: 0, limit: 1, text: '有温度记录（没有任何温度记录的批次不能放行）' });
+  }
   const condHtml = conds.map(function (c) {
     return '<li><span class="cond-text">' + okPill(c.ok) + ' ' + esc(c.text) + '</span>' +
       '<span class="cond-meta">实际 ' + esc(c.value) + '，阈值 ' + esc(c.limit) + '</span></li>';
@@ -589,6 +595,151 @@ async function loadReleasesView() {
   }).join('');
 }
 
+/* ---------- 报表 ---------- */
+
+async function loadReportView() {
+  const f = state.filters.report;
+  const params = new URLSearchParams();
+  if (f.from) params.set('from', toApiTime(f.from));
+  if (f.to) params.set('to', toApiTime(f.to));
+  if (f.roomId) params.set('roomId', f.roomId);
+  if (f.groupBy) params.set('groupBy', f.groupBy);
+  state.report = await api('GET', '/api/reports/temperature' + (params.toString() ? '?' + params.toString() : ''));
+  renderReportRules();
+  renderReport();
+}
+
+function pct(ratio) {
+  return ratio == null ? '—' : (num(ratio) * 100).toFixed(1).replace(/\.0$/, '') + '%';
+}
+
+/* 口径说明与汇总、明细同屏，数值取自接口返回的 settings，三处同一套 */
+function renderReportRules() {
+  const r = state.report;
+  if (!r) return;
+  const s = r.settings || {};
+  const rules = [
+    '批次按入库时刻圈定：入库时刻落在起止区间内的批次计入报表，不填起止表示不限；批次状态不限，在库、待放行、已放行、已拒收都计入。',
+    '跨月批次整体归入入库时刻所在的月份，不拆分；超限时长按批次全周期累计，跨月不重置。',
+    '没有温度记录的批次：计入批次数，超限与断链计 0，不参与平均 MKT；平均 MKT 按有记录的批次取平均（当前 ' + num(r.total.mktBatchCount) + ' 个批次参与）。',
+    '超限、断链、MKT 与批次清单同一口径：温度带 ' + esc(s.lowerLimitC) + ' 到 ' + esc(s.upperLimitC) + ' ℃，超限段时长按相邻记录实际时刻差累加，相邻记录间隔超过 ' + esc(s.chainGapMinutes) + ' 分钟算一处断链，MKT 按动力学公式计算。',
+    '放行与拒收条数：被圈定批次名下的放行台账记录条数。',
+    '汇总行的每个数字都由明细逐条合计而来，点数字可展开对应明细，两处是同一批数据。'
+  ];
+  $('reportRules').innerHTML = rules.map(function (t) { return '<li>' + t + '</li>'; }).join('');
+}
+
+const REPORT_METRICS = {
+  batchCount: { title: '批次明细' },
+  excursionBatchCount: { title: '超限批次明细' },
+  totalExcursionMinutes: { title: '超限段明细' },
+  chainGapCount: { title: '断链明细' },
+  avgMkt: { title: '平均 MKT 明细' },
+  releaseCount: { title: '放行记录明细' },
+  rejectCount: { title: '拒收记录明细' }
+};
+
+function drillCell(groupKey, metric, value) {
+  const active = state.reportDrill[groupKey] === metric ? ' drill-active' : '';
+  return '<button type="button" class="cell-num' + active + '" data-action="report-drill" data-group="' + esc(groupKey) + '" data-metric="' + esc(metric) + '">' + esc(value) + '</button>';
+}
+
+function renderReport() {
+  const r = state.report;
+  const tbody = $('reportRows');
+  if (!r) return;
+  const rows = r.groups.map(function (g) { return reportRow(g, g.key, false); }).join('') +
+    reportRow(Object.assign({ label: '总计', roomStatus: '' }, r.total), '__total__', true);
+  tbody.innerHTML = rows;
+  $('reportNote').textContent = '共 ' + num(r.total.batchCount) + ' 个批次、' + r.groups.length + ' 个分组，点任意数字展开对应明细';
+}
+
+function reportRow(g, key, isTotal) {
+  const statusPill = g.roomStatus && g.roomStatus !== '运行' ? ' ' + pill(g.roomStatus, 'pill-bad') : '';
+  const main = '<tr class="row-report' + (isTotal ? ' row-total' : '') + '">' +
+    '<td>' + esc(g.label) + statusPill + '</td>' +
+    '<td class="num">' + drillCell(key, 'batchCount', g.batchCount) + '</td>' +
+    '<td class="num">' + drillCell(key, 'excursionBatchCount', g.excursionBatchCount) + '</td>' +
+    '<td class="num">' + pct(g.excursionBatchRatio) + '</td>' +
+    '<td class="num">' + drillCell(key, 'totalExcursionMinutes', g.totalExcursionMinutes) + '</td>' +
+    '<td class="num">' + drillCell(key, 'chainGapCount', g.chainGapCount) + '</td>' +
+    '<td class="num">' + drillCell(key, 'avgMkt', g.avgMkt) + '</td>' +
+    '<td class="num">' + drillCell(key, 'releaseCount', g.releaseCount) + '</td>' +
+    '<td class="num">' + drillCell(key, 'rejectCount', g.rejectCount) + '</td>' +
+    '<td class="num">' + pct(g.releaseRatio) + '</td>' +
+    '</tr>';
+  const metric = state.reportDrill[key];
+  if (!metric) return main;
+  return main + '<tr class="row-detail"><td colspan="10">' + renderDrill(metric, g) + '</td></tr>';
+}
+
+/* 明细直接渲染接口返回的明细数组，合计行直接显示接口返回的汇总值，前端不重算 */
+function renderDrill(metric, g) {
+  const title = (REPORT_METRICS[metric] || {}).title || '明细';
+  let body = '';
+  if (metric === 'batchCount') {
+    body = '<table class="mini-table"><thead><tr><th>批次号</th><th>品名</th><th>所在冷库</th><th>入库时刻</th><th>状态</th>' +
+      '<th class="num">记录数</th><th class="num">累计超限(分)</th><th class="num">断链数</th><th class="num">MKT</th><th class="num">放行/拒收</th></tr></thead><tbody>' +
+      (g.batches.map(function (b) {
+        return '<tr><td>' + esc(b.code) + '</td><td>' + esc(b.product) + '</td><td>' + esc(b.roomCode) + '</td>' +
+          '<td>' + esc(b.loadedAt) + '</td><td>' + esc(b.status) + '</td>' +
+          '<td class="num">' + num(b.recordCount) + '</td><td class="num">' + num(b.totalExcursionMinutes) + '</td>' +
+          '<td class="num">' + num(b.chainGapCount) + '</td><td class="num">' + num(b.mkt) + '</td>' +
+          '<td class="num">' + num(b.releaseCount) + ' / ' + num(b.rejectCount) + '</td></tr>';
+      }).join('') || '<tr><td colspan="10" class="empty">没有批次</td></tr>') +
+      '</tbody><tfoot><tr><td colspan="5">合计（与汇总行一致）</td><td class="num">—</td>' +
+      '<td class="num">' + num(g.totalExcursionMinutes) + '</td><td class="num">' + num(g.chainGapCount) + '</td>' +
+      '<td class="num">—</td><td class="num">' + num(g.releaseCount) + ' / ' + num(g.rejectCount) + '</td></tr></tfoot></table>';
+  } else if (metric === 'excursionBatchCount') {
+    body = '<table class="mini-table"><thead><tr><th>批次号</th><th>品名</th><th>入库时刻</th><th>状态</th>' +
+      '<th class="num">最长超限(分)</th><th class="num">累计超限(分)</th></tr></thead><tbody>' +
+      (g.excursionBatches.map(function (b) {
+        return '<tr><td>' + esc(b.code) + '</td><td>' + esc(b.product) + '</td><td>' + esc(b.loadedAt) + '</td><td>' + esc(b.status) + '</td>' +
+          '<td class="num">' + num(b.longestExcursionMinutes) + '</td><td class="num">' + num(b.totalExcursionMinutes) + '</td></tr>';
+      }).join('') || '<tr><td colspan="6" class="empty">没有超限批次</td></tr>') +
+      '</tbody><tfoot><tr><td colspan="4">合计：' + num(g.excursionBatchCount) + ' 个超限批次（占 ' + pct(g.excursionBatchRatio) + '）</td>' +
+      '<td class="num">—</td><td class="num">' + num(g.totalExcursionMinutes) + '</td></tr></tfoot></table>';
+  } else if (metric === 'totalExcursionMinutes') {
+    body = '<table class="mini-table"><thead><tr><th>批次</th><th>起</th><th>止</th>' +
+      '<th class="num">时长(分)</th><th class="num">峰值(℃)</th><th class="num">点数</th></tr></thead><tbody>' +
+      (g.segments.map(function (s) {
+        return '<tr><td>' + esc(s.batchCode) + '</td><td>' + esc(s.startAt) + '</td><td>' + esc(s.endAt) + '</td>' +
+          '<td class="num">' + num(s.minutes) + '</td><td class="num">' + num(s.peakC) + '</td><td class="num">' + num(s.points) + '</td></tr>';
+      }).join('') || '<tr><td colspan="6" class="empty">没有超限段</td></tr>') +
+      '</tbody><tfoot><tr><td colspan="3">合计：' + g.segments.length + ' 段</td>' +
+      '<td class="num">' + num(g.totalExcursionMinutes) + '</td><td class="num" colspan="2">—</td></tr></tfoot></table>';
+  } else if (metric === 'chainGapCount') {
+    body = '<table class="mini-table"><thead><tr><th>批次</th><th>起</th><th>止</th><th class="num">缺口时长(分)</th></tr></thead><tbody>' +
+      (g.chainGaps.map(function (x) {
+        return '<tr><td>' + esc(x.batchCode) + '</td><td>' + esc(x.from) + '</td><td>' + esc(x.to) + '</td>' +
+          '<td class="num">' + num(x.minutes) + '</td></tr>';
+      }).join('') || '<tr><td colspan="4" class="empty">没有断链缺口</td></tr>') +
+      '</tbody><tfoot><tr><td colspan="3">合计：' + num(g.chainGapCount) + ' 处</td>' +
+      '<td class="num">' + num(g.totalGapMinutes) + '</td></tr></tfoot></table>';
+  } else if (metric === 'avgMkt') {
+    body = '<table class="mini-table"><thead><tr><th>批次号</th><th>品名</th><th class="num">记录数</th><th class="num">MKT(℃)</th></tr></thead><tbody>' +
+      (g.mktBatches.map(function (b) {
+        return '<tr><td>' + esc(b.code) + '</td><td>' + esc(b.product) + '</td>' +
+          '<td class="num">' + num(b.recordCount) + '</td><td class="num">' + num(b.mkt) + '</td></tr>';
+      }).join('') || '<tr><td colspan="4" class="empty">没有有记录的批次</td></tr>') +
+      '</tbody><tfoot><tr><td colspan="2">平均（' + num(g.mktBatchCount) + ' 个有记录批次参与，无记录批次不参与）</td>' +
+      '<td class="num">—</td><td class="num">' + num(g.avgMkt) + '</td></tr></tfoot></table>';
+  } else {
+    const want = metric === 'releaseCount' ? '放行' : '拒收';
+    const wantCount = metric === 'releaseCount' ? g.releaseCount : g.rejectCount;
+    const rows = g.releases.filter(function (x) { return x.decision === want; });
+    body = '<table class="mini-table"><thead><tr><th>批次</th><th>决定</th><th>时刻</th><th>经办人</th><th>依据</th></tr></thead><tbody>' +
+      (rows.map(function (x) {
+        return '<tr><td>' + esc(x.batchCode) + '</td>' +
+          '<td>' + (x.decision === '放行' ? pill('放行', 'pill-ok') : pill('拒收', 'pill-bad')) + '</td>' +
+          '<td>' + esc(x.decidedAt) + '</td><td>' + esc(x.decider) + '</td><td>' + esc(x.basis) + '</td></tr>';
+      }).join('') || '<tr><td colspan="5" class="empty">没有' + want + '记录</td></tr>') +
+      '</tbody><tfoot><tr><td colspan="4">合计：' + want + ' ' + num(wantCount) + ' 条（本组放行 ' + num(g.releaseCount) + ' 条、拒收 ' + num(g.rejectCount) + ' 条）</td>' +
+      '<td>—</td></tr></tfoot></table>';
+  }
+  return '<div class="detail-block drill-block"><h4>' + esc(g.label) + ' — ' + esc(title) + '</h4>' + body + '</div>';
+}
+
 /* ---------- 左侧筛选栏 ---------- */
 
 function selectHtml(name, options, value) {
@@ -640,6 +791,15 @@ function renderFilters() {
     const f = state.filters.releases;
     html = '<h3>台账筛选</h3>' +
       '<div class="filter-field"><label>决定</label>' + selectHtml('decision', [{ value: '', label: '全部' }, { value: '放行', label: '放行' }, { value: '拒收', label: '拒收' }], f.decision) + '</div>';
+  } else if (v === 'report') {
+    const f = state.filters.report;
+    const roomSel = [{ value: '', label: '全部冷库' }].concat(state.rooms.map(function (r) { return { value: r.id, label: r.code + ' ' + r.name }; }));
+    html = '<h3>报表条件</h3>' +
+      '<div class="filter-field"><label>入库起</label><input type="datetime-local" data-filter="from" value="' + esc(f.from) + '"></div>' +
+      '<div class="filter-field"><label>入库止</label><input type="datetime-local" data-filter="to" value="' + esc(f.to) + '"></div>' +
+      '<div class="filter-field"><label>冷库</label>' + selectHtml('roomId', roomSel, f.roomId) + '</div>' +
+      '<div class="filter-field"><label>分组方式</label>' + selectHtml('groupBy', [{ value: 'room', label: '按冷库' }, { value: 'month', label: '按月份' }], f.groupBy) + '</div>' +
+      '<div class="filter-hint">条件一改，汇总、明细与占比同时重新生成；同一条件重复生成结果一致。</div>';
   }
   host.innerHTML = html;
 }
@@ -889,6 +1049,14 @@ async function handleAction(action, el) {
       return;
     }
     if (action === 'record-add') { openRecordForm(); return; }
+    if (action === 'report-drill') {
+      const gk = el.dataset.group;
+      const metric = el.dataset.metric;
+      if (state.reportDrill[gk] === metric) delete state.reportDrill[gk];
+      else state.reportDrill[gk] = metric;
+      renderReport();
+      return;
+    }
     if (action === 'record-del') {
       const id = el.dataset.id;
       armDelete(el, async function () {

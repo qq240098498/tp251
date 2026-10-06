@@ -205,6 +205,7 @@ button { font-family: inherit; font-size: 13px; }
 
 .data-table tbody tr.row-main { cursor: pointer; }
 .data-table tbody tr.row-main:hover { background: #f6fbfc; }
+.data-table tbody tr.row-report:hover { background: #f6fbfc; }
 .data-table td.num, .data-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
 
 .cell-actions { white-space: nowrap; }
@@ -257,6 +258,31 @@ tr.row-detail > td { background: #f7fbfc; border-bottom: 1px solid var(--line); 
 .card-sub { color: var(--ink-soft); font-size: 12px; margin-top: 2px; }
 
 .records-note { padding: 6px 12px; color: var(--ink-soft); background: #fbfdfe; border-bottom: 1px solid var(--line-soft); }
+
+/* 报表：口径说明、可点开的汇总数字、明细合计行 */
+.rules-list { margin: 0; padding: 10px 14px 12px 32px; color: var(--ink-soft); font-size: 12px; line-height: 1.8; }
+.rules-list li::marker { color: var(--primary); font-weight: 700; }
+
+.cell-num {
+  border: none;
+  background: transparent;
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: var(--primary-dark);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+.cell-num:hover { background: var(--primary-soft); }
+.cell-num.drill-active { background: var(--primary); color: #fff; text-decoration: none; }
+
+.row-total td { background: #eef6f8; font-weight: 700; border-top: 2px solid var(--line); }
+.row-total .cell-num { color: var(--primary-dark); }
+
+.drill-block { margin: 4px 0 6px; }
+.mini-table tfoot td { background: #f1f8fa; color: var(--primary-dark); font-weight: 700; border-bottom: none; }
 
 .empty { padding: 14px; color: var(--ink-soft); text-align: center; }
 

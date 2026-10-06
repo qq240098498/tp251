@@ -113,6 +113,8 @@ router.delete('/records/:id', withData((data, req) => ({ __save: true, __body: r
 
 router.get('/releases', withData((data, req) => res.listReleases(data, req.query)));
 
+router.get('/reports/temperature', withData((data, req) => res.temperatureReport(data, req.query)));
+
 router.use((req, r, next) => next(new AppError(404, 'NOT_FOUND', '这个地址没有对应功能：' + req.method + ' ' + req.originalUrl)));
 
 module.exports = router;

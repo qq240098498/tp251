@@ -338,6 +338,136 @@ function listReleases(data, query) {
     .sort((a, b) => (a.decidedAt < b.decidedAt ? 1 : -1));
 }
 
+/* ---------- 温控报表 ----------
+   口径（与批次清单、放行判定同一套 coldlib 函数）：
+   - 批次按入库时刻 loadedAt 落入 [from, to] 圈定，不填起止表示不限；批次状态不限，全部计入。
+   - 跨月批次整体归入入库时刻所在的月份，超限时长按批次全周期累计，不拆分、跨月不重置。
+   - 没有温度记录的批次：计入批次数，超限与断链计 0，不参与平均 MKT。
+   - 放行与拒收条数：被圈定批次名下的放行台账记录条数。
+   - 汇总行的每个数字都由同一份明细聚合而来，明细随汇总一起返回，两处天然一致。
+   - 全部排序固定，同一条件重复生成结果一致。 */
+
+const TIME_TEXT = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+
+function byText(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function reportBatchItem(data, batch) {
+  const stats = coldlib.excursionStats(data, batch.id);
+  const chain = coldlib.chainGaps(data, batch.id);
+  const releases = data.releases
+    .filter((r) => r.batchId === batch.id)
+    .slice()
+    .sort((a, b) => byText(a.decidedAt, b.decidedAt) || byText(a.id, b.id));
+  const item = {
+    id: batch.id,
+    code: batch.code,
+    product: batch.product,
+    roomId: batch.roomId,
+    roomCode: roomCode(data, batch.roomId),
+    loadedAt: batch.loadedAt,
+    status: batch.status,
+    recordCount: stats.recordCount,
+    longestExcursionMinutes: stats.longestMinutes,
+    totalExcursionMinutes: stats.totalMinutes,
+    mkt: coldlib.mktCelsius(data, batch.id),
+    chainGapCount: chain.gapCount,
+    releaseCount: releases.filter((r) => r.decision === '放行').length,
+    rejectCount: releases.filter((r) => r.decision === '拒收').length,
+  };
+  const segments = stats.segments.map((s) => ({
+    batchId: batch.id, batchCode: batch.code,
+    startAt: s.startAt, endAt: s.endAt, minutes: s.minutes, peakC: s.peakC, points: s.points,
+  }));
+  const gaps = chain.gaps.map((g) => ({
+    batchId: batch.id, batchCode: batch.code, from: g.from, to: g.to, minutes: g.minutes,
+  }));
+  const releaseRows = releases.map((r) => ({
+    id: r.id, batchId: batch.id, batchCode: batch.code,
+    decision: r.decision, decidedAt: r.decidedAt, decider: r.decider, basis: r.basis,
+  }));
+  return { item, segments, gaps, releaseRows };
+}
+
+// 把一组批次的指标聚成一行汇总，并带上这一组的全部明细
+function aggregateReport(items) {
+  const batchCount = items.length;
+  const excursionItems = items.filter((x) => x.item.totalExcursionMinutes > 0);
+  const mktItems = items.filter((x) => x.item.recordCount > 0);
+  const releaseCount = items.reduce((acc, x) => acc + x.item.releaseCount, 0);
+  const rejectCount = items.reduce((acc, x) => acc + x.item.rejectCount, 0);
+  const sortByBatchThen = (field) => (a, b) => byText(a.batchCode, b.batchCode) || byText(a[field], b[field]);
+  return {
+    batchCount,
+    excursionBatchCount: excursionItems.length,
+    excursionBatchRatio: batchCount ? store.round(excursionItems.length / batchCount, 4) : null,
+    totalExcursionMinutes: items.reduce((acc, x) => acc + x.item.totalExcursionMinutes, 0),
+    chainGapCount: items.reduce((acc, x) => acc + x.item.chainGapCount, 0),
+    totalGapMinutes: items.reduce((acc, x) => acc + x.gaps.reduce((a, g) => a + g.minutes, 0), 0),
+    avgMkt: mktItems.length ? store.round(mktItems.reduce((acc, x) => acc + x.item.mkt, 0) / mktItems.length, 2) : 0,
+    mktBatchCount: mktItems.length,
+    releaseCount,
+    rejectCount,
+    releaseRatio: releaseCount + rejectCount ? store.round(releaseCount / (releaseCount + rejectCount), 4) : null,
+    batches: items.map((x) => x.item),
+    excursionBatches: excursionItems.map((x) => x.item),
+    segments: items.reduce((acc, x) => acc.concat(x.segments), []).sort(sortByBatchThen('startAt')),
+    chainGaps: items.reduce((acc, x) => acc.concat(x.gaps), []).sort(sortByBatchThen('from')),
+    mktBatches: mktItems.map((x) => ({ id: x.item.id, code: x.item.code, product: x.item.product, recordCount: x.item.recordCount, mkt: x.item.mkt })),
+    releases: items.reduce((acc, x) => acc.concat(x.releaseRows), []).sort((a, b) => byText(a.decidedAt, b.decidedAt) || byText(a.id, b.id)),
+  };
+}
+
+function temperatureReport(data, query) {
+  const q = query || {};
+  const errors = {};
+  if (q.from && !TIME_TEXT.test(String(q.from))) errors.from = '起始时刻格式要像 2026-09-01 08:00:00';
+  if (q.to && !TIME_TEXT.test(String(q.to))) errors.to = '截止时刻格式要像 2026-09-30 23:59:59';
+  if (!errors.from && !errors.to && q.from && q.to && q.from > q.to) errors.to = '起始时刻不能晚于截止时刻';
+  const groupBy = q.groupBy || 'room';
+  if (!['room', 'month'].includes(groupBy)) errors.groupBy = '分组方式只能是 room 或者 month';
+  if (Object.keys(errors).length) throw new AppError(400, 'VALIDATION_FAILED', '报表条件没通过校验', errors);
+
+  let batches = data.batches.slice();
+  if (q.roomId) batches = batches.filter((b) => b.roomId === q.roomId);
+  if (q.from) batches = batches.filter((b) => b.loadedAt >= q.from);
+  if (q.to) batches = batches.filter((b) => b.loadedAt <= q.to);
+  batches.sort((a, b) => byText(a.loadedAt, b.loadedAt) || byText(a.id, b.id));
+
+  const entries = batches.map((b) => reportBatchItem(data, b));
+
+  const buckets = new Map();
+  for (const entry of entries) {
+    const key = groupBy === 'month' ? entry.item.loadedAt.slice(0, 7) : entry.item.roomId;
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(entry);
+  }
+
+  const groups = Array.from(buckets.keys()).map((key) => {
+    const room = groupBy === 'room' ? data.rooms.find((r) => r.id === key) : null;
+    const label = groupBy === 'month' ? key : (room ? room.code + ' ' + room.name : key);
+    return Object.assign(
+      { key, label, roomStatus: room ? room.status : '' },
+      aggregateReport(buckets.get(key))
+    );
+  });
+  groups.sort((a, b) => byText(a.label, b.label));
+
+  return {
+    query: { from: q.from || '', to: q.to || '', roomId: q.roomId || '', groupBy },
+    settings: {
+      lowerLimitC: Number(data.settings.lowerLimitC),
+      upperLimitC: Number(data.settings.upperLimitC),
+      allowExcursionMinutes: Number(data.settings.allowExcursionMinutes),
+      allowTotalExcursionMinutes: Number(data.settings.allowTotalExcursionMinutes),
+      chainGapMinutes: Number(data.settings.chainGapMinutes),
+    },
+    groups,
+    total: aggregateReport(entries),
+  };
+}
+
 // 放行：登记放行单并改批次状态
 function decide(data, batchId, payload) {
   const batch = data.batches.find((b) => b.id === batchId);
@@ -373,6 +503,6 @@ module.exports = {
   listProbes, createProbe, updateProbe, removeProbe,
   listBatches, batchDetail, createBatch, updateBatch, removeBatch,
   listRecords, createRecord, removeRecord,
-  listReleases, decide,
+  listReleases, decide, temperatureReport,
   ROOM_STATUS, ROOM_TYPE, PROBE_STATUS, BATCH_STATUS, SOURCE_LIST,
 };

@@ -26,6 +26,7 @@
     <button type="button" class="tab" data-view="batches">批次</button>
     <button type="button" class="tab" data-view="records">温度记录</button>
     <button type="button" class="tab" data-view="releases">放行台账</button>
+    <button type="button" class="tab" data-view="report">报表</button>
   </nav>
 
   <main class="layout">
@@ -129,6 +130,35 @@
                 </tr>
               </thead>
               <tbody id="recordRows"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="view" data-view="report" id="view-report">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>报表口径</h2>
+            <span class="panel-hint">汇总与明细用同一套口径、同一批数据，两处合计必然一致</span>
+          </div>
+          <ol class="rules-list" id="reportRules"></ol>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>温控汇总</h2>
+            <span class="panel-hint" id="reportNote">点任意数字展开对应明细</span>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>分组</th>
+                  <th class="num">批次数</th><th class="num">超限批次数</th><th class="num">超限占比</th>
+                  <th class="num">超限总时长(分)</th><th class="num">断链处数</th><th class="num">平均MKT(℃)</th>
+                  <th class="num">放行(条)</th><th class="num">拒收(条)</th><th class="num">放行占比</th>
+                </tr>
+              </thead>
+              <tbody id="reportRows"></tbody>
             </table>
           </div>
         </div>
