@@ -31,6 +31,11 @@ const state = {
     batches: { status: '', roomId: '', product: '', noRecord: false },
     records: { batchId: '', probeId: '', source: '', from: '', to: '' },
     releases: { decision: '' }
+  },
+  report: {
+    filters: { from: '', to: '', roomId: '', groupBy: 'month', statuses: BATCH_STATUS.slice() },
+    data: null,
+    drill: null
   }
 };
 
@@ -184,6 +189,7 @@ async function loadView(view) {
     else if (view === 'batches') await loadBatchesView();
     else if (view === 'records') await loadRecordsView();
     else if (view === 'releases') await loadReleasesView();
+    else if (view === 'report') await loadReportView();
   } catch (err) { showError(err); }
 }
 
@@ -589,6 +595,196 @@ async function loadReleasesView() {
   }).join('');
 }
 
+/* ---------- 温控报表 ---------- */
+
+/* 指标定义：metric -> 取数、明细数组、明细表头。汇总单元格与明细都走这一份定义，
+   合计行也由同一份数据渲染，从结构上避免两处对不上。 */
+const REPORT_METRICS = [
+  { key: 'batchCount', label: '批次数', detail: 'batches' },
+  { key: 'excursionBatchCount', label: '超限批次数', detail: 'excursionBatches', rate: 'excursionRate', rateBase: '占批次数的比例' },
+  { key: 'excursionMinutes', label: '超限总时长', detail: 'segments', suffix: ' 分' },
+  { key: 'chainGapCount', label: '断链处数', detail: 'gaps' },
+  { key: 'averageMkt', label: '平均 MKT', detail: 'mktBatches', suffix: ' ℃' },
+  { key: 'releasedCount', label: '放行条数', detail: 'releases', onlyDecision: '放行', rate: 'releasedRate', rateBase: '占放行单总数的比例' },
+  { key: 'rejectedCount', label: '拒收条数', detail: 'releases', onlyDecision: '拒收', rate: 'rejectedRate', rateBase: '占放行单总数的比例' }
+];
+
+async function loadReportView() {
+  renderReportControls();
+  renderReportBasis();
+  await fetchReport();
+}
+
+async function fetchReport() {
+  const f = state.report.filters;
+  const params = new URLSearchParams();
+  // 日期直接传 YYYY-MM-DD：后端把起补成 00:00:00、止补成 23:59:59，避免截止日当天被丢掉
+  if (f.from) params.set('from', f.from);
+  if (f.to) params.set('to', f.to);
+  if (f.roomId) params.set('roomId', f.roomId);
+  params.set('groupBy', f.groupBy);
+  f.statuses.forEach(function (s) { params.append('statuses', s); });
+  state.report.data = await api('GET', '/api/report?' + params.toString());
+  state.report.drill = null;
+  renderReport();
+  renderReportDetail();
+}
+
+function renderReportControls() {
+  const f = state.report.filters;
+  const roomSel = ['<option value="">全部冷库</option>'].concat(state.rooms.map(function (r) {
+    return '<option value="' + esc(r.id) + '"' + (r.id === f.roomId ? ' selected' : '') + '>' + esc(r.code + ' ' + r.name) + '</option>';
+  })).join('');
+  const checks = BATCH_STATUS.map(function (s) {
+    return '<label class="check-pill"><input type="checkbox" data-report-filter="status" value="' + esc(s) + '"' +
+      (f.statuses.includes(s) ? ' checked' : '') + '> ' + esc(s) + '</label>';
+  }).join('');
+  $('reportControls').innerHTML =
+    '<div class="report-field"><label>起始日期</label><input type="date" data-report-filter="from" value="' + esc(f.from) + '"></div>' +
+    '<div class="report-field"><label>截止日期</label><input type="date" data-report-filter="to" value="' + esc(f.to) + '"></div>' +
+    '<div class="report-field"><label>冷库</label><select data-report-filter="roomId">' + roomSel + '</select></div>' +
+    '<div class="report-field"><label>汇总维度</label><select data-report-filter="groupBy">' +
+      '<option value="month"' + (f.groupBy === 'month' ? ' selected' : '') + '>按月（跨月批次归入入库月）</option>' +
+      '<option value="room"' + (f.groupBy === 'room' ? ' selected' : '') + '>按冷库</option>' +
+    '</select></div>' +
+    '<div class="report-field report-field-grow"><label>计入批次状态</label><div class="check-row">' + checks + '</div></div>';
+}
+
+function renderReportBasis() {
+  const d = state.report.data;
+  const basis = d ? d.basis : [];
+  if (basis.length) $('reportBasis').innerHTML = basis.map(function (t) { return '<li>' + esc(t) + '</li>'; }).join('');
+}
+
+function scopeLabel(scope, groupBy) {
+  if (scope.key === 'TOTAL') return '合计';
+  return groupBy === 'room' ? esc(scope.code + ' ' + scope.name) : esc(scope.month);
+}
+
+function metricCell(row, m) {
+  const v = row[m.key];
+  const rate = m.rate ? '<span class="rate-tag" title="' + esc(m.rateBase || '') + '">' + esc(row[m.rate]) + '%</span>' : '';
+  return '<td class="num report-num is-link" data-action="report-drill" data-scope="' + esc(row.scope.key) +
+    '" data-metric="' + esc(m.key) + '" title="点开逐条明细"><span class="num-value">' + esc(v) +
+    (m.suffix && Number(v) !== 0 ? esc(m.suffix) : '') + '</span>' + rate + '</td>';
+}
+
+function renderReport() {
+  const d = state.report.data;
+  if (!d) return;
+  renderReportBasis();
+  $('reportGroupTh').textContent = d.criteria.groupBy === 'room' ? '冷库' : '月份';
+  const c = d.criteria;
+  $('reportMeta').textContent =
+    '区间 ' + (c.from || '不限') + ' 至 ' + (c.to || '不限') +
+    '；状态 ' + c.statuses.join('、') +
+    (c.roomId ? '；单冷库' : '；全部冷库') +
+    '；共 ' + d.total.batchCount + ' 批';
+
+  const rowsHtml = d.rows.map(function (row) {
+    return '<tr>' +
+      '<td class="scope-cell">' + scopeLabel(row.scope, c.groupBy) + '</td>' +
+      REPORT_METRICS.map(function (m) { return metricCell(row, m); }).join('') +
+      '</tr>';
+  }).join('');
+  const totalHtml = '<tr class="report-total">' +
+    '<td class="scope-cell">合计</td>' +
+    REPORT_METRICS.map(function (m) { return metricCell(d.total, m); }).join('') +
+    '</tr>';
+  $('reportRows').innerHTML = rowsHtml + totalHtml;
+}
+
+function detailTable(metric, items) {
+  if (metric === 'batches' || metric === 'excursionBatches') {
+    const head = '<tr><th>批次号</th><th>品名</th><th>状态</th><th>冷库</th><th>入库时刻</th>' +
+      '<th class="num">记录数</th><th class="num">超限段</th><th class="num">超限时长(分)</th>' +
+      '<th class="num">断链处</th><th class="num">MKT</th><th class="num">放行</th><th class="num">拒收</th><th>备注</th></tr>';
+    const body = items.map(function (b) {
+      return '<tr' + (b.noRecord ? ' class="row-muted"' : '') + '><td>' + esc(b.code) + '</td><td>' + esc(b.product) + '</td>' +
+        '<td>' + esc(b.status) + '</td><td>' + esc(b.roomCode) + '</td><td>' + esc(b.loadedAt) + '</td>' +
+        '<td class="num">' + num(b.recordCount) + '</td>' +
+        '<td class="num">' + num(b.segmentCount) + '</td><td class="num">' + num(b.excursionMinutes) + '</td>' +
+        '<td class="num">' + num(b.gapCount) + '</td><td class="num">' + (b.noRecord ? '—' : num(b.mkt)) + '</td>' +
+        '<td class="num">' + num(b.releasedCount) + '</td><td class="num">' + num(b.rejectedCount) + '</td>' +
+        '<td>' + (b.noRecord ? pill('无记录', 'pill-mute') : '') + '</td></tr>';
+    }).join('');
+    return '<table class="data-table"><thead>' + head + '</thead><tbody>' + body + '</tbody></table>';
+  }
+  if (metric === 'segments') {
+    const head = '<tr><th>批次号</th><th>冷库</th><th>超限起</th><th>超限止</th><th class="num">时长(分)</th><th class="num">峰值(℃)</th><th class="num">点数</th></tr>';
+    const body = items.map(function (s) {
+      return '<tr class="row-danger-text"><td>' + esc(s.batchCode) + '</td><td>' + esc(s.roomCode) + '</td>' +
+        '<td>' + esc(s.startAt) + '</td><td>' + esc(s.endAt) + '</td>' +
+        '<td class="num">' + num(s.minutes) + '</td><td class="num">' + num(s.peakC) + '</td><td class="num">' + num(s.points) + '</td></tr>';
+    }).join('');
+    return '<table class="data-table"><thead>' + head + '</thead><tbody>' + body + '</tbody></table>';
+  }
+  if (metric === 'gaps') {
+    const head = '<tr><th>批次号</th><th>冷库</th><th>断链起</th><th>断链止</th><th class="num">缺口(分)</th></tr>';
+    const body = items.map(function (g) {
+      return '<tr class="row-danger-text"><td>' + esc(g.batchCode) + '</td><td>' + esc(g.roomCode) + '</td>' +
+        '<td>' + esc(g.from) + '</td><td>' + esc(g.to) + '</td><td class="num">' + num(g.minutes) + '</td></tr>';
+    }).join('');
+    return '<table class="data-table"><thead>' + head + '</thead><tbody>' + body + '</tbody></table>';
+  }
+  if (metric === 'mktBatches') {
+    const head = '<tr><th>批次号</th><th>冷库</th><th class="num">参与记录数</th><th class="num">批次 MKT(℃)</th></tr>';
+    const body = items.map(function (b) {
+      return '<tr><td>' + esc(b.code) + '</td><td>' + esc(b.roomCode) + '</td>' +
+        '<td class="num">' + num(b.recordCount) + '</td><td class="num">' + num(b.mkt) + '</td></tr>';
+    }).join('');
+    const avg = items.length ? (items.reduce(function (a, b) { return a + num(b.mkt); }, 0) / items.length).toFixed(2) : '0';
+    return '<table class="data-table"><thead>' + head + '</thead><tbody>' + body + '</tbody></table>' +
+      '<div class="detail-note">共 ' + items.length + ' 批参与平均（无记录批次不参与），平均 MKT = ' + avg + ' ℃</div>';
+  }
+  // releases（放行/拒收共用一个明细数组，按决定过滤并在表头高亮）
+  const head = '<tr><th>批次号</th><th>冷库</th><th>决定</th><th>决定时刻</th><th>经办人</th><th>依据</th></tr>';
+  const body = items.map(function (r) {
+    return '<tr><td>' + esc(r.batchCode) + '</td><td>' + esc(r.roomCode) + '</td>' +
+      '<td>' + (r.decision === '放行' ? pill('放行', 'pill-ok') : pill('拒收', 'pill-bad')) + '</td>' +
+      '<td>' + esc(r.decidedAt) + '</td><td>' + esc(r.decider) + '</td><td>' + esc(r.basis) + '</td></tr>';
+  }).join('');
+  return '<table class="data-table"><thead>' + head + '</thead><tbody>' + body + '</tbody></table>';
+}
+
+function renderReportDetail() {
+  const panel = $('reportDetailPanel');
+  const drill = state.report.drill;
+  const d = state.report.data;
+  if (!drill || !d) { panel.hidden = true; return; }
+  const row = drill.scope === 'TOTAL' ? d.total : d.rows.find(function (r) { return r.scope.key === drill.scope; });
+  const metric = REPORT_METRICS.find(function (m) { return m.key === drill.metric; });
+  if (!row || !metric) { panel.hidden = true; return; }
+  let items = row.details[metric.detail] || [];
+  if (metric.onlyDecision) items = items.filter(function (r) { return r.decision === metric.onlyDecision; });
+
+  $('reportDetailTitle').textContent = metric.label + ' · 明细 — ' +
+    (drill.scope === 'TOTAL' ? '合计' : (d.criteria.groupBy === 'room' ? row.scope.code + ' ' + row.scope.name : row.scope.month));
+  // 合计校验：明细必须等于单元格上的汇总数。条数类对条数，时长类对明细求和，MKT 对明细重算的平均值。
+  let gotText, expectText, consistent;
+  if (drill.metric === 'excursionMinutes') {
+    const sum = items.reduce(function (a, s) { return a + num(s.minutes); }, 0);
+    gotText = '明细合计 ' + sum + ' 分';
+    expectText = '汇总 ' + row.excursionMinutes + ' 分';
+    consistent = sum === num(row.excursionMinutes);
+  } else if (drill.metric === 'averageMkt') {
+    const avg = items.length ? Number((items.reduce(function (a, b) { return a + num(b.mkt); }, 0) / items.length).toFixed(2)) : 0;
+    gotText = '明细重算平均 ' + avg + ' ℃（' + items.length + ' 批参与）';
+    expectText = '汇总 ' + num(row.averageMkt) + ' ℃';
+    consistent = avg === num(row.averageMkt);
+  } else {
+    gotText = '明细 ' + items.length + ' 条';
+    expectText = '汇总 ' + row[metric.key] + ' 条';
+    consistent = items.length === num(row[metric.key]);
+  }
+  $('reportDetailMatch').textContent = gotText + '，与汇总' + (consistent ? '一致' : '不一致') + '（' + expectText + '）';
+  $('reportDetailMatch').className = 'panel-hint ' + (consistent ? 'match-ok' : 'match-bad');
+  $('reportDetailBody').innerHTML = items.length
+    ? detailTable(drill.metric, items)
+    : '<div class="empty">这个口径下没有明细条目</div>';
+  panel.hidden = false;
+}
+
 /* ---------- 左侧筛选栏 ---------- */
 
 function selectHtml(name, options, value) {
@@ -640,6 +836,8 @@ function renderFilters() {
     const f = state.filters.releases;
     html = '<h3>台账筛选</h3>' +
       '<div class="filter-field"><label>决定</label>' + selectHtml('decision', [{ value: '', label: '全部' }, { value: '放行', label: '放行' }, { value: '拒收', label: '拒收' }], f.decision) + '</div>';
+  } else if (v === 'report') {
+    html = '<h3>温控报表</h3><div class="filter-hint">条件在右侧「报表条件」面板：时间区间、冷库、计入状态、按月或按冷库。<br><br>点汇总表里的数字可逐条下钻；口径写在页面底部，汇总与明细共用同一套。</div>';
   }
   host.innerHTML = html;
 }
@@ -899,6 +1097,19 @@ async function handleAction(action, el) {
       });
       return;
     }
+    if (action === 'report-drill') {
+      state.report.drill = { scope: el.dataset.scope, metric: el.dataset.metric };
+      renderReportDetail();
+      $('reportDetailPanel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      return;
+    }
+    if (action === 'toggle-basis') {
+      const list = $('reportBasis');
+      const hidden = list.hidden;
+      list.hidden = !hidden;
+      $('reportBasisToggle').textContent = hidden ? '收起' : '展开';
+      return;
+    }
   } catch (err) { showError(err); }
 }
 
@@ -929,6 +1140,28 @@ document.body.addEventListener('click', function (e) {
 
 $('filters').addEventListener('change', onFilterInput);
 $('filters').addEventListener('input', onFilterInput);
+
+let reportTimer = null;
+function onReportFilterInput(e) {
+  const key = e.target.dataset.reportFilter;
+  if (!key) return;
+  const f = state.report.filters;
+  if (key === 'status') {
+    const picked = Array.prototype.slice.call(document.querySelectorAll('[data-report-filter="status"]:checked')).map(function (n) { return n.value; });
+    if (!picked.length) {
+      showError({ message: '至少要勾选一个批次状态' });
+      renderReportControls();
+      return;
+    }
+    f.statuses = picked;
+  } else {
+    f[key] = e.target.value;
+  }
+  if (reportTimer) clearTimeout(reportTimer);
+  reportTimer = setTimeout(function () { fetchReport().catch(showError); }, 250);
+}
+$('reportControls').addEventListener('change', onReportFilterInput);
+$('reportControls').addEventListener('input', onReportFilterInput);
 
 $('modalClose').addEventListener('click', closeModal);
 $('modalCancel').addEventListener('click', closeModal);

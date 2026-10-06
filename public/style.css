@@ -258,6 +258,67 @@ tr.row-detail > td { background: #f7fbfc; border-bottom: 1px solid var(--line); 
 
 .records-note { padding: 6px 12px; color: var(--ink-soft); background: #fbfdfe; border-bottom: 1px solid var(--line-soft); }
 
+/* 温控报表 */
+.report-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  padding: 12px;
+  align-items: flex-end;
+}
+.report-field { display: flex; flex-direction: column; gap: 3px; }
+.report-field-grow { flex: 1 1 260px; }
+.report-field label { color: var(--ink-soft); font-size: 12px; }
+.report-field input, .report-field select {
+  padding: 5px 7px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 13px;
+  font-family: inherit;
+}
+.check-row { display: flex; flex-wrap: wrap; gap: 6px 12px; }
+.check-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  cursor: pointer;
+  color: var(--ink);
+}
+.check-pill:hover { border-color: var(--primary); }
+.check-pill input { margin: 0; }
+
+.report-table { min-width: 760px; }
+.report-table .scope-cell { font-weight: 700; color: var(--primary-dark); }
+.report-num { cursor: pointer; }
+.report-num:hover { background: var(--primary-soft); }
+.report-num.is-zero { cursor: default; color: var(--ink-soft); }
+.report-num.is-zero:hover { background: transparent; }
+.num-value { font-variant-numeric: tabular-nums; font-weight: 700; }
+.rate-tag {
+  display: inline-block;
+  margin-left: 5px;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--primary-soft);
+  color: var(--primary-dark);
+  font-size: 11px;
+  font-weight: 400;
+}
+.report-total td { background: #eef6f8; font-weight: 700; border-top: 2px solid var(--line); }
+.row-muted td { color: var(--ink-soft); }
+.row-danger-text td { color: var(--accent); }
+.match-ok { color: var(--ok); }
+.match-bad { color: var(--accent); font-weight: 700; }
+
+.basis-list { margin: 0; padding: 8px 28px 12px; }
+.basis-list li { margin: 4px 0; color: var(--ink-soft); line-height: 1.7; }
+
 .empty { padding: 14px; color: var(--ink-soft); text-align: center; }
 
 /* 弹层 */

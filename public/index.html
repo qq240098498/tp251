@@ -26,6 +26,7 @@
     <button type="button" class="tab" data-view="batches">批次</button>
     <button type="button" class="tab" data-view="records">温度记录</button>
     <button type="button" class="tab" data-view="releases">放行台账</button>
+    <button type="button" class="tab" data-view="report">温控报表</button>
   </nav>
 
   <main class="layout">
@@ -152,6 +153,56 @@
               <tbody id="releaseRows"></tbody>
             </table>
           </div>
+        </div>
+      </div>
+
+      <div class="view" data-view="report" id="view-report">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>报表条件</h2>
+            <span class="panel-hint">改动条件后汇总、明细、占比同时重新生成</span>
+          </div>
+          <div class="report-controls" id="reportControls"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>温控汇总</h2>
+            <span class="panel-hint" id="reportMeta"></span>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table report-table">
+              <thead>
+                <tr>
+                  <th id="reportGroupTh">月份</th>
+                  <th class="num">批次数</th>
+                  <th class="num">超限批次数</th>
+                  <th class="num">超限总时长(分)</th>
+                  <th class="num">断链处数</th>
+                  <th class="num">平均 MKT(℃)</th>
+                  <th class="num">放行条数</th>
+                  <th class="num">拒收条数</th>
+                </tr>
+              </thead>
+              <tbody id="reportRows"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel" id="reportDetailPanel" hidden>
+          <div class="panel-head">
+            <h2 id="reportDetailTitle">明细</h2>
+            <span class="panel-hint" id="reportDetailMatch"></span>
+          </div>
+          <div class="table-wrap" id="reportDetailBody"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>报表口径</h2>
+            <button type="button" class="btn btn-sm" id="reportBasisToggle" data-action="toggle-basis">收起</button>
+          </div>
+          <ol class="basis-list" id="reportBasis"></ol>
         </div>
       </div>
     </section>
